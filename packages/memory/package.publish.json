@@ -1,0 +1,64 @@
+{
+  "name": "@pubber-subber/memory",
+  "version": "0.0.1",
+  "description": "In-memory pub/sub adapter for @pubber-subber. Use in tests, dev, and single-process apps.",
+  "keywords": [
+    "pubsub",
+    "pub-sub",
+    "messaging",
+    "events",
+    "adapter",
+    "in-memory",
+    "eventemitter",
+    "in-process",
+    "typescript"
+  ],
+  "homepage": "https://github.com/samishal1998/pubber-subber/tree/main/packages/memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samishal1998/pubber-subber.git",
+    "directory": "packages/memory"
+  },
+  "bugs": {
+    "url": "https://github.com/samishal1998/pubber-subber/issues"
+  },
+  "author": "Sami Mishal",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "src", "README.md", "LICENSE"],
+  "scripts": {
+    "prebuild": "node ../../scripts/swap-package-json.mjs build",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "node ../../scripts/swap-package-json.mjs publish",
+    "postpublish": "node ../../scripts/swap-package-json.mjs build"
+  },
+  "peerDependencies": {
+    "@pubber-subber/core": "^0.0.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@pubber-subber/core": "workspace:*"
+  }
+}

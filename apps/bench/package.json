@@ -1,0 +1,32 @@
+{
+  "name": "@pubber-subber/bench",
+  "version": "0.0.0",
+  "private": true,
+  "description": "HTTP load benchmark for pubber-subber adapters driven by k6.",
+  "type": "module",
+  "scripts": {
+    "server": "node --import tsx src/server.ts",
+    "bench": "node --import tsx src/run.ts",
+    "bench:memory": "node --import tsx src/run.ts memory",
+    "bench:redis": "node --import tsx src/run.ts redis",
+    "bench:pg": "node --import tsx src/run.ts pg",
+    "bench:memory:burst": "node --import tsx src/run.ts memory k6/burst.js",
+    "bench:redis:burst": "node --import tsx src/run.ts redis k6/burst.js",
+    "bench:pg:burst": "node --import tsx src/run.ts pg k6/burst.js"
+  },
+  "dependencies": {
+    "@pubber-subber/core": "workspace:*",
+    "@pubber-subber/memory": "workspace:*",
+    "@pubber-subber/pg": "workspace:*",
+    "@pubber-subber/redis": "workspace:*",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^10.16.0",
+    "@testcontainers/redis": "^10.16.0",
+    "@types/pg": "^8.11.10",
+    "testcontainers": "^10.16.0",
+    "tsx": "^4.19.2"
+  }
+}

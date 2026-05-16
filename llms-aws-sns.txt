@@ -1,0 +1,154 @@
+# @pubber-subber/aws-sns
+
+> AWS SNS **publish-only** adapter built on `@aws-sdk/client-sns`. Pair with `@pubber-subber/aws-sqs` via `compose()` for SNS → SQS fan-out and full duplex.
+
+SNS publishes; subscriptions are server-side (HTTP endpoints, SQS, Lambda, mobile push, email, SMS) and managed by AWS, outside the in-process world this library covers.
+
+## Install
+
+```sh
+npm install @pubber-subber/core @pubber-subber/aws-sns @aws-sdk/client-sns
+# pnpm add @pubber-subber/core @pubber-subber/aws-sns @aws-sdk/client-sns
+```
+
+`@aws-sdk/client-sns` is a **peer dependency**. AWS auth follows the SDK's default credential chain.
+
+## Setup — publish only
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { awsSns } from '@pubber-subber/aws-sns';
+
+const pubsub = new PubSub({
+  adapter: awsSns({ region: 'us-east-1' }),
+});
+
+await pubsub.publish(
+  'arn:aws:sns:us-east-1:000000000000:orders',
+  { id: 1, total: 4200 },
+);
+```
+
+## Setup — full duplex via SNS → SQS
+
+```ts
+import { PubSub, compose } from '@pubber-subber/core';
+import { awsSns } from '@pubber-subber/aws-sns';
+import { awsSqs } from '@pubber-subber/aws-sqs';
+
+const pubsub = new PubSub({
+  adapter: compose({
+    publisher: awsSns({ region: 'us-east-1' }),
+    subscriber: awsSqs({
+      region: 'us-east-1',
+      queueUrl: 'https://sqs.us-east-1.amazonaws.com/000000000000/orders',
+    }),
+  }),
+});
+
+await pubsub.subscribe('orders', (msg) => handle(msg.payload));
+await pubsub.publish('arn:aws:sns:us-east-1:000000000000:orders', { id: 1 });
+```
+
+The SNS → SQS subscription must already be wired (typically via Terraform/CDK).
+
+## Options
+
+```ts
+awsSns({
+  region?: string;
+  topicArn?: string;              // default TopicArn for publishes
+  client?: SNSClient;
+  options?: SNSClientConfig;
+  codec?: Codec;
+})
+```
+
+| Option | Notes |
+| --- | --- |
+| `region` | AWS region. |
+| `topicArn` | Default TopicArn used when the `topic` argument isn't already an ARN and `meta.topicArn` isn't set. |
+| `client` | Pre-constructed `SNSClient`. |
+| `options` | Full `SNSClientConfig` (custom endpoint, credentials, retry strategy). |
+| `codec` | Payload encoder/decoder. Default `jsonCodec()`. |
+
+## Publish meta
+
+```ts
+await pubsub.publish(topicArn, payload, {
+  messageAttributes: {
+    tenantId: { DataType: 'String', StringValue: 't1' },
+    priority: { DataType: 'Number', StringValue: '5' },
+  },
+  subject: 'New User Created',
+  messageGroupId: 'group-1',          // FIFO topics
+  messageDeduplicationId: 'dedupe-1', // FIFO topics
+});
+```
+
+| Field | Notes |
+| --- | --- |
+| `topicArn` | Override the TopicArn for this publish. |
+| `targetArn` | SNS `TargetArn` (mobile push endpoints). |
+| `phoneNumber` | SMS recipient (for direct SMS publishes). |
+| `messageAttributes` | Forwarded to SNS `MessageAttributes`. |
+| `messageGroupId` | FIFO topics only — message group key. |
+| `messageDeduplicationId` | FIFO topics only — deduplication key. |
+| `subject` | SNS `Subject` (used as email subject for email subscriptions). |
+
+## TopicArn resolution
+
+The `topic` argument to `pubsub.publish()` is resolved in this order:
+
+1. If `topic` begins with `arn:aws:sns:`, it is used directly as the TopicArn.
+2. Otherwise, `opts.topicArn` (set when constructing the adapter).
+3. Or `meta.topicArn` for per-call override.
+
+```ts
+// 1. Topic is already an ARN
+await pubsub.publish('arn:aws:sns:us-east-1:000:orders', payload);
+
+// 2. Use opts.topicArn from adapter setup
+const pubsub = new PubSub({
+  adapter: awsSns({ region: 'us-east-1', topicArn: 'arn:aws:sns:us-east-1:000:orders' }),
+});
+await pubsub.publish('logical.name', payload);  // routes to opts.topicArn
+
+// 3. Per-call override
+await pubsub.publish('logical.name', payload, {
+  topicArn: 'arn:aws:sns:us-east-1:000:other-topic',
+});
+```
+
+## Capabilities
+
+```
+publish: true
+subscribe: false           // calling subscribe() throws NotSupportedError
+patternSubscribe: false
+ack: false
+```
+
+## LocalStack for development
+
+```sh
+docker run --rm -d -p 4566:4566 -e SERVICES=sns,sqs localstack/localstack
+```
+
+```ts
+const pubsub = new PubSub({
+  adapter: awsSns({
+    region: 'us-east-1',
+    options: { endpoint: 'http://localhost:4566' },
+  }),
+});
+```
+
+Use the [aws-cli with `--endpoint-url=http://localhost:4566`](https://docs.localstack.cloud/user-guide/integrations/aws-cli/) to create topics and subscriptions for testing.
+
+## Links
+
+- npm: https://www.npmjs.com/package/@pubber-subber/aws-sns
+- GitHub: https://github.com/samishal1998/pubber-subber/tree/main/packages/aws-sns
+- Pair with SQS: https://github.com/samishal1998/pubber-subber/blob/main/llms-aws-sqs.txt
+- Core: https://github.com/samishal1998/pubber-subber/blob/main/llms-core.txt

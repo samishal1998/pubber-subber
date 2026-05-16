@@ -1,0 +1,191 @@
+# @pubber-subber/aws-sqs
+
+> AWS SQS **subscribe-only** adapter built on `@aws-sdk/client-sqs`. Long-polls the queue, auto-acks on success / nacks on failure. Unwraps SNS notification envelopes transparently for SNS → SQS pipelines.
+
+## Install
+
+```sh
+npm install @pubber-subber/core @pubber-subber/aws-sqs @aws-sdk/client-sqs
+# pnpm add @pubber-subber/core @pubber-subber/aws-sqs @aws-sdk/client-sqs
+```
+
+`@aws-sdk/client-sqs` is a **peer dependency**. AWS auth follows the SDK's default credential chain.
+
+## Setup — receive only
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { awsSqs } from '@pubber-subber/aws-sqs';
+
+const pubsub = new PubSub({
+  adapter: awsSqs({
+    region: 'us-east-1',
+    queueUrl: 'https://sqs.us-east-1.amazonaws.com/000000000000/orders',
+  }),
+});
+
+const sub = await pubsub.subscribe('orders', (msg) => {
+  console.log(msg.payload);
+  // Auto-ack (DeleteMessage) on resolve. Auto-nack (VisibilityTimeout=0) on throw.
+});
+
+// Long-polling runs in the background until unsubscribe.
+// await sub.unsubscribe();
+// await pubsub.disconnect();
+```
+
+## Setup — pair with SNS for full duplex
+
+```ts
+import { PubSub, compose } from '@pubber-subber/core';
+import { awsSns } from '@pubber-subber/aws-sns';
+import { awsSqs } from '@pubber-subber/aws-sqs';
+
+const pubsub = new PubSub({
+  adapter: compose({
+    publisher: awsSns({ region: 'us-east-1' }),
+    subscriber: awsSqs({
+      region: 'us-east-1',
+      queueUrl: 'https://sqs.us-east-1.amazonaws.com/000000000000/orders',
+    }),
+  }),
+});
+```
+
+The SNS → SQS subscription must already be wired (Terraform/CDK).
+
+## Options
+
+```ts
+awsSqs({
+  region?: string;
+  queueUrl?: string;             // default for subscribes
+  client?: SQSClient;
+  options?: SQSClientConfig;
+  codec?: Codec;
+})
+```
+
+| Option | Notes |
+| --- | --- |
+| `region` | AWS region. |
+| `queueUrl` | Default queue URL when `meta.queueUrl` isn't passed on subscribe. |
+| `client` | Pre-constructed `SQSClient`. |
+| `options` | Full `SQSClientConfig` (custom endpoint for LocalStack, retry, credentials). |
+| `codec` | Payload encoder/decoder. Default `jsonCodec()`. |
+
+## Subscribe meta
+
+```ts
+await pubsub.subscribe('orders', handler, {
+  queueUrl: 'https://sqs.us-east-1.amazonaws.com/000000000000/orders-fifo.fifo',
+  waitTimeSeconds: 20,
+  maxMessages: 10,
+  handlerConcurrency: 5,
+  visibilityTimeout: 60,
+});
+```
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `queueUrl` | `opts.queueUrl` | One **must** be set, otherwise `SubscriptionError` is thrown. |
+| `waitTimeSeconds` | 20 | SQS long-poll wait. 0–20. Higher → fewer empty receives, lower API cost. |
+| `maxMessages` | 10 | Per `ReceiveMessage` batch. 1–10. |
+| `visibilityTimeout` | (queue default) | Override per subscription. |
+| `handlerConcurrency` | 5 | Max in-flight handler invocations. Increase for I/O-bound handlers. |
+
+## Capabilities
+
+```
+publish: false             // calling publish() throws NotSupportedError
+subscribe: true
+patternSubscribe: false
+ack: true
+```
+
+## Ack semantics
+
+- Handler resolves → `DeleteMessage` (ack).
+- Handler throws → `ChangeMessageVisibility(VisibilityTimeout=0)` so the message is immediately retried (nack).
+- For manual control, call `msg.ack()` or `msg.nack()` inside your handler. The adapter tracks the resolution and skips the auto-resolve.
+
+```ts
+await pubsub.subscribe('orders', async (msg) => {
+  try {
+    await processOrder(msg.payload);
+  } catch (err) {
+    if (isTransient(err)) {
+      await msg.nack?.();   // immediate retry
+    } else {
+      await msg.ack?.();    // poison: don't retry, drop (or route to DLQ via queue config)
+      await logToDLQTable(msg.payload, err);
+    }
+  }
+});
+```
+
+## SNS → SQS envelope unwrapping
+
+If a received message body looks like an SNS notification:
+
+```json
+{
+  "Type": "Notification",
+  "MessageId": "...",
+  "Message": "<inner payload as JSON string>",
+  "MessageAttributes": { ... }
+}
+```
+
+the adapter:
+
+- decodes the inner `Message` through the codec (so the JSON SNS publishes is unwrapped to your original payload),
+- exposes the SNS attributes on `AdapterMessage.meta.snsAttributes`.
+
+Your handler sees the original payload, not the envelope.
+
+## FIFO queues
+
+For FIFO ordering, set concurrency to 1:
+
+```ts
+await pubsub.subscribe('orders', handler, {
+  queueUrl: 'https://sqs.us-east-1.amazonaws.com/000000000000/orders.fifo',
+  maxMessages: 1,
+  handlerConcurrency: 1,
+});
+```
+
+## LocalStack for development
+
+```sh
+docker run --rm -d -p 4566:4566 -e SERVICES=sns,sqs localstack/localstack
+
+# Create a queue
+aws --endpoint-url=http://localhost:4566 sqs create-queue --queue-name orders
+QUEUE=$(aws --endpoint-url=http://localhost:4566 sqs get-queue-url --queue-name orders --query QueueUrl --output text)
+```
+
+```ts
+const pubsub = new PubSub({
+  adapter: awsSqs({
+    region: 'us-east-1',
+    queueUrl: process.env.SQS_QUEUE_URL,
+    options: { endpoint: 'http://localhost:4566' },
+  }),
+});
+```
+
+Set `AWS_ACCESS_KEY_ID=test`, `AWS_SECRET_ACCESS_KEY=test`, `AWS_REGION=us-east-1` for LocalStack auth.
+
+## Behavior notes
+
+- The receive loop runs in the background after `subscribe()` resolves. `unsubscribe()` halts it and drains any in-flight handler invocations before resolving.
+- On a transient `ReceiveMessage` failure (network, throttling), the loop backs off 1s and retries. Persistent failures show up via `PubSub`'s `onError` callback.
+
+## Links
+
+- npm: https://www.npmjs.com/package/@pubber-subber/aws-sqs
+- GitHub: https://github.com/samishal1998/pubber-subber/tree/main/packages/aws-sqs
+- Pair with SNS: https://github.com/samishal1998/pubber-subber/blob/main/llms-aws-sns.txt
+- Core: https://github.com/samishal1998/pubber-subber/blob/main/llms-core.txt

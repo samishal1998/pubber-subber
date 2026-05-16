@@ -1,0 +1,334 @@
+# @pubber-subber/core
+
+> Transport-agnostic pub/sub core. Defines the adapter contract, the `PubSub` facade your app uses, codec helpers, a typed error hierarchy, `compose()` for hybrid publish/subscribe, and a vitest-based conformance kit. Zero runtime dependencies. Dual ESM + CJS. Node 20.11+.
+
+## Install
+
+```sh
+npm install @pubber-subber/core
+# pnpm add @pubber-subber/core
+# yarn add @pubber-subber/core
+```
+
+You also need at least one adapter — see the per-adapter setup pages:
+
+- https://github.com/samishal1998/pubber-subber/blob/main/llms-memory.txt
+- https://github.com/samishal1998/pubber-subber/blob/main/llms-redis.txt
+- https://github.com/samishal1998/pubber-subber/blob/main/llms-pg.txt
+- https://github.com/samishal1998/pubber-subber/blob/main/llms-gcp-pubsub.txt
+- https://github.com/samishal1998/pubber-subber/blob/main/llms-aws-sns.txt
+- https://github.com/samishal1998/pubber-subber/blob/main/llms-aws-sqs.txt
+
+## Imports
+
+```ts
+import {
+  PubSub,
+  compose,
+  jsonCodec,
+  passthroughCodec,
+  matchTopic,
+  isPattern,
+  PubSubError,
+  NotSupportedError,
+  ConnectionError,
+  SerializationError,
+  SubscriptionError,
+  PublishError,
+} from '@pubber-subber/core';
+
+import type {
+  PubSubAdapter,
+  AnyAdapter,
+  PublishMetaOf,
+  SubscribeMetaOf,
+  UnsubscribeMetaOf,
+  AdapterMessage,
+  MessageHandler,
+  SubscriptionHandle,
+  AdapterCapabilities,
+  Codec,
+} from '@pubber-subber/core';
+
+// Optional conformance kit (vitest is a peer dep, only required when importing this)
+import { runConformance } from '@pubber-subber/core/testing';
+```
+
+## `PubSub` facade
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { memory } from '@pubber-subber/memory';
+
+const pubsub = new PubSub({
+  adapter: memory(),
+  defaultMeta: {              // optional — merged into every publish/subscribe call
+    publish: { /* ... */ },
+    subscribe: { /* ... */ },
+  },
+  onError: (err, ctx) => {    // optional — fires on adapter failures
+    // ctx.op is 'publish' | 'subscribe' | 'handler' | 'unsubscribe'
+    // ctx.topic is the topic involved
+    console.error(ctx.op, ctx.topic, err);
+  },
+});
+
+await pubsub.connect();        // lazy: also called automatically on first op
+await pubsub.publish('users.created', { id: 1 });
+const sub = await pubsub.subscribe('users.created', (msg, meta) => {
+  console.log(msg.topic, msg.payload);
+});
+await sub.unsubscribe();
+await pubsub.disconnect();     // unsubscribes all live handles, then closes the adapter
+
+pubsub.isConnected;            // boolean — useful for health checks
+pubsub.adapter;                // the underlying adapter, if you need to escape the abstraction
+```
+
+`defaultMeta` is **merged** with the call-site `meta` on every publish/subscribe; the call-site wins on key collision.
+
+## `compose()` — hybrid publisher + subscriber
+
+For platforms that split publish from subscribe (canonical case: AWS, where SNS publishes and SQS receives):
+
+```ts
+import { PubSub, compose } from '@pubber-subber/core';
+import { awsSns } from '@pubber-subber/aws-sns';
+import { awsSqs } from '@pubber-subber/aws-sqs';
+
+const pubsub = new PubSub({
+  adapter: compose({
+    publisher: awsSns({ region: 'us-east-1' }),
+    subscriber: awsSqs({
+      region: 'us-east-1',
+      queueUrl: 'https://sqs.us-east-1.amazonaws.com/000000000000/orders',
+    }),
+  }),
+});
+```
+
+Capabilities are unioned (`publish` from publisher, `subscribe`/`ack` from subscriber). `connect`/`disconnect` fan out to both.
+
+## Codecs
+
+Pluggable serializer. JSON is the default for adapters that need encoding.
+
+```ts
+import { jsonCodec, passthroughCodec, type Codec } from '@pubber-subber/core';
+
+// Built-ins
+const json = jsonCodec();          // JSON.stringify / JSON.parse
+const raw = passthroughCodec();    // for byte-pipe adapters; accepts string | Uint8Array only
+
+// Custom (e.g. MessagePack)
+import * as msgpack from '@msgpack/msgpack';
+const msgpackCodec: Codec = {
+  name: 'msgpack',
+  encode: (v) => msgpack.encode(v),
+  decode: (d) => msgpack.decode(d instanceof Uint8Array ? d : new TextEncoder().encode(d)),
+};
+
+// Adapters that accept a codec take it via opts.codec:
+import { redis } from '@pubber-subber/redis';
+const pubsub = new PubSub({ adapter: redis({ url: '...', codec: msgpackCodec }) });
+```
+
+## Errors
+
+All errors extend `PubSubError`, which extends `Error` (so the standard `Error.cause` works).
+
+```ts
+import { NotSupportedError, PublishError } from '@pubber-subber/core';
+
+try {
+  await pubsub.publish('t', hugePayload);
+} catch (err) {
+  if (err instanceof PublishError) { /* e.g. pg NOTIFY size limit */ }
+  if (err instanceof NotSupportedError) { /* adapter doesn't support this op */ }
+}
+```
+
+| Class | Thrown when |
+| --- | --- |
+| `NotSupportedError` | Adapter doesn't support the requested operation (e.g. publish on aws-sqs, subscribe on aws-sns). |
+| `ConnectionError` | Connect or disconnect failure. |
+| `SerializationError` | Codec encode/decode failure. |
+| `SubscriptionError` | Subscribe-side wiring failure (e.g. missing required config). |
+| `PublishError` | Publish-side wiring failure (e.g. pg NOTIFY payload > 8KB). |
+
+## Writing a custom adapter
+
+```ts
+import type {
+  AdapterMessage,
+  MessageHandler,
+  PubSubAdapter,
+  SubscriptionHandle,
+} from '@pubber-subber/core';
+
+interface MyPublishMeta {
+  /* knobs you want to expose on publish, e.g. priority, routingKey */
+}
+
+interface MySubscribeMeta {
+  /* knobs you want to expose on subscribe, e.g. groupId, prefetch */
+}
+
+interface MyOptions {
+  url: string;
+  /* ... */
+}
+
+export function myAdapter(
+  opts: MyOptions,
+): PubSubAdapter<MyPublishMeta, MySubscribeMeta> {
+  let client: SomeClient | null = null;
+  const handlers = new Map<string, Set<MessageHandler>>();
+
+  return {
+    name: 'my-adapter',
+    capabilities: {
+      publish: true,
+      subscribe: true,
+      patternSubscribe: false,
+      ack: false,
+    },
+
+    async connect() {
+      client = await SomeClient.connect(opts.url);
+      client.on('message', (channel, payload) => {
+        const set = handlers.get(channel);
+        if (!set) return;
+        const msg: AdapterMessage = { topic: channel, payload, raw: payload };
+        for (const h of [...set]) Promise.resolve(h(msg)).catch(() => {});
+      });
+    },
+
+    async disconnect() {
+      handlers.clear();
+      await client?.close();
+      client = null;
+    },
+
+    async publish(topic, payload, meta) {
+      if (!client) throw new Error('not connected');
+      await client.publish(topic, payload);
+    },
+
+    async subscribe(topic, handler, meta): Promise<SubscriptionHandle> {
+      let set = handlers.get(topic);
+      const first = !set;
+      if (!set) {
+        set = new Set();
+        handlers.set(topic, set);
+      }
+      set.add(handler);
+      if (first) await client!.subscribe(topic);
+
+      return {
+        id: `my-${++idCounter}`,
+        topic,
+        unsubscribe: async () => {
+          set!.delete(handler);
+          if (set!.size === 0) {
+            handlers.delete(topic);
+            await client?.unsubscribe(topic);
+          }
+        },
+      };
+    },
+  };
+}
+```
+
+The three generic meta slots (`TPubMeta`, `TSubMeta`, `TUnsubMeta`) propagate through the `PubSub` facade via `PublishMetaOf<A>` / `SubscribeMetaOf<A>` so users get IntelliSense for your knobs without you bloating the core.
+
+## Conformance test kit (for adapter authors)
+
+The same vitest suite that validates the official adapters is exported for your own:
+
+```ts
+// my-adapter/test/conformance.test.ts
+import { runConformance } from '@pubber-subber/core/testing';
+import { myAdapter } from '../src/index.js';
+
+runConformance({
+  name: 'my-adapter',
+  createAdapter: async () => {
+    // start whatever your adapter needs (testcontainer, emulator, etc.)
+    return myAdapter({ url: '...' });
+  },
+  teardownAdapter: async (adapter) => {
+    // optional: stop containers, close connections
+  },
+
+  // For adapters without certain capabilities:
+  skip: {
+    patternSubscribe: true,
+    metadata: false,
+    multipleSubscribers: false,
+    lateSubscriber: false,
+  },
+
+  // Bump these if your transport has noticeable propagation latency:
+  deliveryTimeoutMs: 5000,
+  quietWindowMs: 500,
+});
+```
+
+Tests covered:
+
+- single round-trip
+- multi-subscriber fan-out
+- subscribers added after publish do not see backfill
+- unsubscribe stops delivery
+- metadata pass-through to handlers
+- pattern subscriptions (only when the adapter declares the capability)
+
+`vitest` is an **optional peer dependency** — only required when you import from `@pubber-subber/core/testing`.
+
+## API summary
+
+```ts
+// Classes / functions
+export class PubSub<TAdapter>
+export function compose<P, S>(opts: { publisher: P; subscriber: S; name?: string }): PubSubAdapter
+
+// Contract
+export interface PubSubAdapter<TPubMeta, TSubMeta, TUnsubMeta>
+export type PublishMetaOf<A>
+export type SubscribeMetaOf<A>
+export type UnsubscribeMetaOf<A>
+
+// Messages / handles
+export interface AdapterMessage<TPayload>
+export type MessageHandler<TPayload, TMeta>
+export interface SubscriptionHandle
+export interface AdapterCapabilities
+
+// Codecs
+export interface Codec
+export function jsonCodec(): Codec
+export function passthroughCodec(): Codec
+
+// Errors
+export class PubSubError extends Error
+export class NotSupportedError extends PubSubError
+export class ConnectionError extends PubSubError
+export class SerializationError extends PubSubError
+export class SubscriptionError extends PubSubError
+export class PublishError extends PubSubError
+
+// Topic matching
+export function matchTopic(pattern: string, topic: string): boolean
+export function isPattern(input: string): boolean
+
+// From '@pubber-subber/core/testing':
+export function runConformance(opts: ConformanceOptions): void
+```
+
+## Links
+
+- npm: https://www.npmjs.com/package/@pubber-subber/core
+- GitHub: https://github.com/samishal1998/pubber-subber/tree/main/packages/core
+- Full reference: https://github.com/samishal1998/pubber-subber/blob/main/llms-full.txt

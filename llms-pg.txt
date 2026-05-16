@@ -1,0 +1,136 @@
+# @pubber-subber/pg
+
+> Postgres `LISTEN/NOTIFY` pub/sub adapter built on `pg` (node-postgres). Reuses your existing Postgres database for pub/sub — zero additional infrastructure for low-to-medium throughput.
+
+## Install
+
+```sh
+npm install @pubber-subber/core @pubber-subber/pg pg
+# pnpm add @pubber-subber/core @pubber-subber/pg pg
+```
+
+`pg` is a **peer dependency**.
+
+## Setup
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { pg } from '@pubber-subber/pg';
+
+const pubsub = new PubSub({
+  adapter: pg({ connectionString: 'postgres://user:pass@host:5432/db' }),
+});
+
+const sub = await pubsub.subscribe('outbox.processed', (msg) => {
+  console.log(msg.payload);
+});
+
+await pubsub.publish('outbox.processed', { outboxId: 42, status: 'ok' });
+
+await sub.unsubscribe();
+await pubsub.disconnect();
+```
+
+## Options
+
+```ts
+pg({
+  connectionString?: string;
+  config?: ClientConfig;          // full pg.ClientConfig
+  client?: Client;                // bring-your-own
+  codec?: Codec;
+})
+```
+
+| Option | Notes |
+| --- | --- |
+| `connectionString` | Standard libpq connection string. |
+| `config` | Full `pg.ClientConfig`. Merged with `connectionString`. |
+| `client` | Bring-your-own `pg.Client`. Adapter will NOT call `connect()` / `end()` on it. |
+| `codec` | Payload encoder/decoder. Default `jsonCodec()`. |
+
+## Publish meta
+
+```ts
+await pubsub.publish('outbox.processed', payload, { channel: 'outbox' });
+```
+
+| Field | Notes |
+| --- | --- |
+| `channel` | Override the wire channel. The logical topic stays on `AdapterMessage.topic`. |
+
+## Subscribe meta
+
+| Field | Notes |
+| --- | --- |
+| `channel` | Override the wire channel. |
+
+## Capabilities
+
+```
+publish: true
+subscribe: true
+patternSubscribe: false   // Postgres LISTEN does not support wildcards
+ack: false
+```
+
+## Postgres-specific constraints
+
+These come from Postgres itself — understand them before using `LISTEN/NOTIFY`:
+
+- **Channel names ≤ 63 bytes.** Longer topics are hashed to `pubsub_<sha256[:32]>` and an internal map preserves the original logical topic on delivery. Pass `meta.channel` to override.
+- **NOTIFY payloads ≤ ~8000 bytes.** The adapter rejects encoded payloads above ~7500 bytes (leaves room for protocol overhead) with `PublishError`. Common pattern: publish a reference, resolve the body via `SELECT` in the subscriber.
+
+  ```ts
+  // Bad: huge payload
+  await pubsub.publish('orders.created', wholeOrderObject); // throws PublishError if > 7500 bytes
+
+  // Good: publish a reference
+  await pubsub.publish('orders.created', { id: order.id });
+  // Subscriber:
+  await pubsub.subscribe('orders.created', async (msg) => {
+    const { id } = msg.payload as { id: number };
+    const order = await db.select().from(orders).where(eq(orders.id, id));
+    // ...
+  });
+  ```
+- **No wildcards.** `LISTEN` does not support patterns. Pattern subscribes fail. If you need fan-out across topics, build a server-side trigger function.
+- **One dedicated `pg.Client` per adapter** is used for `LISTEN` so that traffic does not block other queries on the same connection. Re-use your existing connection pool for query traffic.
+- **No SQL injection.** Publishes use parameterized `SELECT pg_notify($1, $2)`. `LISTEN`/`UNLISTEN` quote and escape the channel identifier.
+
+## Bring your own pg client
+
+```ts
+import { Client } from 'pg';
+import { PubSub } from '@pubber-subber/core';
+import { pg } from '@pubber-subber/pg';
+
+const client = new Client({ connectionString: process.env.DATABASE_URL });
+await client.connect();
+
+const pubsub = new PubSub({ adapter: pg({ client }) });
+
+// ...
+
+// Your responsibility to client.end() when done.
+```
+
+## Local Postgres via Docker
+
+```sh
+docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16
+```
+
+Connection string: `postgres://postgres:postgres@localhost:5432/postgres`.
+
+## Caveats
+
+- `LISTEN/NOTIFY` is fire-and-forget. Messages published while a subscriber is disconnected are not buffered. For durable delivery, write to an outbox table and `NOTIFY` the row id.
+- Pub/sub throughput is limited by the single LISTEN backend connection — significantly lower than dedicated brokers (Redis pub/sub is ~8x faster on equivalent hardware). Use this when you don't want extra infrastructure, not when you need broker-grade throughput.
+
+## Links
+
+- npm: https://www.npmjs.com/package/@pubber-subber/pg
+- GitHub: https://github.com/samishal1998/pubber-subber/tree/main/packages/pg
+- Core: https://github.com/samishal1998/pubber-subber/blob/main/llms-core.txt
+- node-postgres: https://node-postgres.com/

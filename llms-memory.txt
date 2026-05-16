@@ -1,0 +1,112 @@
+# @pubber-subber/memory
+
+> In-process pub/sub adapter. EventEmitter-style fan-out, glob pattern subscriptions, payload cloning, zero external dependencies. Use it in tests, in single-process apps, and for local development.
+
+## Install
+
+```sh
+npm install @pubber-subber/core @pubber-subber/memory
+# pnpm add @pubber-subber/core @pubber-subber/memory
+```
+
+No peer dependencies. Works on Node 20.11+, browsers, and any runtime with `EventEmitter` and `structuredClone`.
+
+## Setup
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { memory } from '@pubber-subber/memory';
+
+const pubsub = new PubSub({ adapter: memory() });
+
+// Subscribe
+const sub = await pubsub.subscribe('users.created', (msg) => {
+  console.log(msg.topic, msg.payload);
+});
+
+// Publish
+await pubsub.publish('users.created', { id: 1, name: 'Alice' });
+
+// Teardown
+await sub.unsubscribe();
+await pubsub.disconnect();
+```
+
+## Options
+
+```ts
+memory({ rawPayloads?: boolean })
+```
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `rawPayloads` | `false` | If `true`, subscribers receive the publisher's exact object reference. Default is to `structuredClone()` so subscribers can't mutate the publisher's data. Set `true` for immutable payloads, expensive-to-clone objects, or non-cloneable values (functions, class instances). |
+
+## Capabilities
+
+```
+publish: true
+subscribe: true
+patternSubscribe: true
+ack: false
+```
+
+## Glob pattern subscriptions
+
+Built-in matcher — no external dependency.
+
+| Pattern | Matches | Does not match |
+| --- | --- | --- |
+| `*` | any run within a topic segment | content past a `.` |
+| `**` | any run across segments | — |
+| `?` | exactly one char in a segment | `.` |
+
+```ts
+await pubsub.subscribe('users.*', handler);   // users.created, users.updated — NOT users.created.email
+await pubsub.subscribe('users.**', handler);  // users.created, users.created.email, ...
+await pubsub.subscribe('user?', handler);     // user1, users — NOT user, user.x
+```
+
+## Metadata
+
+The memory adapter forwards any object as `AdapterMessage.meta` and as the second handler argument. It doesn't interpret it — use it for tracing, tenant IDs, correlation IDs, etc.
+
+```ts
+await pubsub.subscribe('t', (msg, meta) => {
+  // msg.meta === { traceId: 'abc' }   (forwarded from publish)
+  // meta     === undefined            (no subscribe-side meta passed)
+});
+
+await pubsub.publish('t', payload, { traceId: 'abc' });
+```
+
+## Behavior notes
+
+- `publish()` awaits each subscriber's handler in order before resolving. When `publish()` resolves, every live subscriber has been called.
+- Subscribers added *after* a publish do not see backfill (consistent across the ecosystem).
+- One handler throwing does not break delivery to the others. Errors surface via `PubSub`'s `onError` callback if set.
+
+## Common patterns
+
+```ts
+// Use memory in tests against the same code that runs Redis in prod:
+import { PubSub, type PubSubAdapter } from '@pubber-subber/core';
+import { memory } from '@pubber-subber/memory';
+
+function makeApp(adapter: PubSubAdapter) {
+  return new PubSub({ adapter });
+}
+
+// test:
+const app = makeApp(memory());
+
+// prod:
+import { redis } from '@pubber-subber/redis';
+const app = makeApp(redis({ url: process.env.REDIS_URL! }));
+```
+
+## Links
+
+- npm: https://www.npmjs.com/package/@pubber-subber/memory
+- GitHub: https://github.com/samishal1998/pubber-subber/tree/main/packages/memory
+- Core: https://github.com/samishal1998/pubber-subber/blob/main/llms-core.txt

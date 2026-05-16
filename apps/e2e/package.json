@@ -1,0 +1,30 @@
+{
+  "name": "@pubber-subber/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "End-to-end conformance tests against real adapter backends via Testcontainers.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:memory": "vitest run test/memory.e2e.test.ts",
+    "test:redis": "vitest run test/redis.e2e.test.ts",
+    "test:pg": "vitest run test/pg.e2e.test.ts"
+  },
+  "dependencies": {
+    "@pubber-subber/core": "workspace:*",
+    "@pubber-subber/memory": "workspace:*",
+    "@pubber-subber/pg": "workspace:*",
+    "@pubber-subber/redis": "workspace:*",
+    "@pubber-subber/rxjs": "workspace:*",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.1",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^10.16.0",
+    "@testcontainers/redis": "^10.16.0",
+    "@types/pg": "^8.11.10",
+    "testcontainers": "^10.16.0"
+  }
+}

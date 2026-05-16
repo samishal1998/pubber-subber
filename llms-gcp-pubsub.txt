@@ -1,0 +1,164 @@
+# @pubber-subber/gcp-pubsub
+
+> Google Cloud Pub/Sub adapter built on the official `@google-cloud/pubsub` SDK. Auto-ack on handler success / nack on failure. Optional manual ack.
+
+## Install
+
+```sh
+npm install @pubber-subber/core @pubber-subber/gcp-pubsub @google-cloud/pubsub
+# pnpm add @pubber-subber/core @pubber-subber/gcp-pubsub @google-cloud/pubsub
+```
+
+`@google-cloud/pubsub` is a **peer dependency**. Auth follows GCP defaults (`GOOGLE_APPLICATION_CREDENTIALS`, Workload Identity, etc.).
+
+## Setup (production)
+
+The subscription must exist (typically pre-created via Terraform/CDK). Pass its name explicitly so workers share it and load-balance the message stream:
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { gcpPubSub } from '@pubber-subber/gcp-pubsub';
+
+const pubsub = new PubSub({
+  adapter: gcpPubSub({ projectId: 'my-project' }),
+});
+
+const sub = await pubsub.subscribe(
+  'users.created',
+  (msg) => {
+    console.log(msg.payload, msg.meta?.attributes);
+    // Auto-ack on resolve. Auto-nack on throw.
+  },
+  { subscriptionName: 'workers-users-created' },
+);
+
+await pubsub.publish('users.created', { id: 1 }, {
+  attributes: { tenantId: 't1' },
+  orderingKey: 'user-1',
+});
+```
+
+## Setup (dev / emulator)
+
+The [Pub/Sub emulator](https://cloud.google.com/pubsub/docs/emulator) works out of the box with the SDK:
+
+```sh
+gcloud beta emulators pubsub start --project=test-project --host-port=0.0.0.0:8085
+export PUBSUB_EMULATOR_HOST=localhost:8085
+export PUBSUB_PROJECT_ID=test-project
+gcloud --project=test-project pubsub topics create demo-topic
+```
+
+```ts
+const pubsub = new PubSub({
+  adapter: gcpPubSub({ projectId: 'test-project' }),
+});
+
+const sub = await pubsub.subscribe(
+  'demo-topic',
+  (msg) => console.log(msg.payload),
+  {
+    subscriptionName: 'demo-sub',
+    createIfMissing: true,    // create the subscription on demand
+    ephemeral: true,          // delete it on unsubscribe (dev only!)
+  },
+);
+```
+
+## Options
+
+```ts
+gcpPubSub({
+  projectId?: string;
+  client?: GooglePubSub;             // pre-built @google-cloud/pubsub client
+  options?: ClientConfig;
+  codec?: Codec;
+  subscriptionPrefix?: string;       // default: 'pubber'
+})
+```
+
+| Option | Notes |
+| --- | --- |
+| `projectId` | GCP project. Falls back to `options.projectId` / SDK auto-detection. |
+| `client` | Pre-constructed `PubSub` client from `@google-cloud/pubsub`. Useful for sharing. |
+| `options` | Full `ClientConfig` from the SDK (transport, scopes, etc.). |
+| `codec` | Payload encoder/decoder. Default `jsonCodec()`. |
+| `subscriptionPrefix` | Prefix used when `subscriptionName` is auto-generated. |
+
+## Publish meta
+
+```ts
+await pubsub.publish('users.created', payload, {
+  attributes: { tenantId: 't1', source: 'web' },
+  orderingKey: 'user-1',
+});
+```
+
+| Field | Notes |
+| --- | --- |
+| `attributes` | `Record<string, string>` forwarded to Pub/Sub message attributes. |
+| `orderingKey` | Forwarded as the ordering key. Requires the topic to have message ordering enabled. |
+
+## Subscribe meta
+
+```ts
+await pubsub.subscribe('users.created', handler, {
+  subscriptionName: 'workers-users-created',
+  createIfMissing: true,
+  subscriptionOptions: { ackDeadlineSeconds: 60 },
+});
+```
+
+| Field | Notes |
+| --- | --- |
+| `subscriptionName` | Existing subscription. **Required for production** — every worker must share the same name to load-balance. If omitted, a unique name is generated per process (dev / one-off only). |
+| `createIfMissing` | Create the subscription on demand if it doesn't exist. |
+| `subscriptionOptions` | Forwarded to `topic.createSubscription()`. |
+| `ephemeral` | Delete the subscription on `unsubscribe`. Use in tests; **never** in production. |
+
+## Capabilities
+
+```
+publish: true
+subscribe: true
+patternSubscribe: false
+ack: true
+```
+
+## Ack semantics
+
+- Handler resolves successfully → `message.ack()`.
+- Handler throws → `message.nack()`. Server redelivers per the subscription's retry policy.
+- For manual control, call `msg.ack()` or `msg.nack()` inside your handler. The adapter tracks the resolution and skips the auto-ack to avoid double-ack.
+
+```ts
+await pubsub.subscribe('payments.captured', async (msg) => {
+  try {
+    await processPayment(msg.payload);
+    await msg.ack?.();         // explicit ack (optional — auto-ack would fire anyway)
+  } catch (err) {
+    if (isTransient(err)) {
+      await msg.nack?.();      // explicit nack
+    } else {
+      await msg.ack?.();       // poison message → don't retry; route to DLQ via subscription config
+      await routeToDeadLetter(msg.payload, err);
+    }
+  }
+});
+```
+
+## Topic names
+
+The adapter passes topic names through as-is. You can use:
+
+- bare names: `users.created` (resolved against the configured project)
+- fully qualified: `projects/my-project/topics/users.created`
+
+The adapter does **not** auto-create topics — only subscriptions (via `createIfMissing`). Topics must exist before you publish.
+
+## Links
+
+- npm: https://www.npmjs.com/package/@pubber-subber/gcp-pubsub
+- GitHub: https://github.com/samishal1998/pubber-subber/tree/main/packages/gcp-pubsub
+- Core: https://github.com/samishal1998/pubber-subber/blob/main/llms-core.txt
+- Google SDK: https://www.npmjs.com/package/@google-cloud/pubsub

@@ -1,0 +1,792 @@
+# pubber-subber — full reference
+
+> Transport-agnostic pub/sub for Node.js. One API across in-memory, Redis, Postgres LISTEN/NOTIFY, Google Cloud Pub/Sub, AWS SNS/SQS. Bring-your-own adapter for anything else. Optional RxJS bridge. TypeScript-first, dual ESM/CJS, zero-dependency core.
+
+GitHub: https://github.com/samishal1998/pubber-subber
+
+---
+
+## Table of contents
+
+1. Concepts
+2. Install — adapter matrix
+3. Quick start
+4. PubSub facade — full API
+5. compose() — hybrid publisher + subscriber
+6. Codecs
+7. Errors
+8. In-memory adapter (`@pubber-subber/memory`)
+9. Redis adapter (`@pubber-subber/redis`)
+10. Postgres adapter (`@pubber-subber/pg`)
+11. Google Cloud Pub/Sub adapter (`@pubber-subber/gcp-pubsub`)
+12. AWS SNS adapter (`@pubber-subber/aws-sns`)
+13. AWS SQS adapter (`@pubber-subber/aws-sqs`)
+14. RxJS bridge (`@pubber-subber/rxjs`)
+15. Writing a custom adapter
+16. Conformance test kit
+17. Common patterns
+
+---
+
+## 1. Concepts
+
+- **`PubSub`** — the facade your app uses. Holds an adapter, tracks live subscription handles, merges default meta, dispatches errors to your `onError` callback.
+- **Adapter** — implements `PubSubAdapter`. Maps the abstract `publish`/`subscribe` calls to a real transport (in-memory, Redis, Postgres, GCP, AWS, …).
+- **`AdapterMessage<T>`** — what subscribers receive: `{ topic, payload, raw, meta, ack?, nack? }`.
+- **Meta** — adapter-specific knobs passed as the last argument to every method. Three slots (`TPubMeta`, `TSubMeta`, `TUnsubMeta`) flow through types so you get IntelliSense for the chosen adapter.
+- **`compose()`** — combines a publish-capable adapter and a subscribe-capable adapter into one (canonical use: AWS SNS + SQS).
+- **Codec** — pluggable serializer (default JSON) used by adapters that need to encode payloads on the wire.
+
+---
+
+## 2. Install — adapter matrix
+
+```sh
+# Core (always required)
+npm install @pubber-subber/core
+
+# Pick one or more adapters
+npm install @pubber-subber/memory                                  # in-process
+npm install @pubber-subber/redis ioredis                            # Redis / Valkey / KeyDB / Dragonfly
+npm install @pubber-subber/pg pg                                    # Postgres LISTEN/NOTIFY
+npm install @pubber-subber/gcp-pubsub @google-cloud/pubsub          # Google Cloud Pub/Sub
+npm install @pubber-subber/aws-sns @aws-sdk/client-sns              # AWS SNS (publish-only)
+npm install @pubber-subber/aws-sqs @aws-sdk/client-sqs              # AWS SQS (subscribe-only)
+npm install @pubber-subber/rxjs rxjs                                # Optional RxJS bridge
+```
+
+Driver SDKs (`ioredis`, `pg`, `@google-cloud/pubsub`, `@aws-sdk/client-*`, `rxjs`) are **peer dependencies** — install only what you use.
+
+Node 20.11+. ESM and CommonJS both supported.
+
+---
+
+## 3. Quick start
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { memory } from '@pubber-subber/memory';
+
+const pubsub = new PubSub({ adapter: memory() });
+
+const sub = await pubsub.subscribe('users.created', (msg) => {
+  console.log(msg.topic, msg.payload);
+});
+
+await pubsub.publish('users.created', { id: 1, name: 'Alice' });
+
+await sub.unsubscribe();
+await pubsub.disconnect();
+```
+
+Swap `memory()` for `redis(...)`, `pg(...)`, `gcpPubSub(...)`, or a composed `awsSns()`/`awsSqs()` pair — nothing else in your code changes.
+
+---
+
+## 4. PubSub facade — full API
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+
+const pubsub = new PubSub<TAdapter>({
+  adapter: TAdapter,
+  defaultMeta?: {
+    publish?: PublishMetaOf<TAdapter>;
+    subscribe?: SubscribeMetaOf<TAdapter>;
+  };
+  onError?: (
+    err: unknown,
+    ctx: { op: 'publish' | 'subscribe' | 'handler' | 'unsubscribe'; topic: string },
+  ) => void;
+});
+```
+
+### Methods
+
+```ts
+// Connect (lazy — auto-called on first op)
+await pubsub.connect();
+
+// Publish
+await pubsub.publish<T>(
+  topic: string,
+  payload: T,
+  meta?: PublishMetaOf<TAdapter>,
+): Promise<void>;
+
+// Subscribe — returns a SubscriptionHandle
+const sub = await pubsub.subscribe<T>(
+  topic: string,
+  handler: (msg: AdapterMessage<T>, meta?: SubscribeMetaOf<TAdapter>) => void | Promise<void>,
+  meta?: SubscribeMetaOf<TAdapter>,
+): Promise<SubscriptionHandle>;
+
+await sub.unsubscribe();
+// sub.id, sub.topic also available
+
+// Disconnect — unsubscribes all live handles, then closes the adapter
+await pubsub.disconnect();
+
+// State
+pubsub.isConnected;         // boolean
+pubsub.adapter;             // raw adapter, for escape hatches
+```
+
+### Meta merging
+
+`defaultMeta.publish` (or `.subscribe`) is **merged** with the call-site meta on every call. Call-site keys win on collision. Merge is shallow (one level of object spread).
+
+```ts
+const pubsub = new PubSub({
+  adapter: redis({ url }),
+  defaultMeta: { publish: { channel: 'fallback' } },
+});
+
+await pubsub.publish('t', payload);                          // sends to 'fallback'
+await pubsub.publish('t', payload, { channel: 'override' }); // sends to 'override'
+```
+
+---
+
+## 5. compose() — hybrid publisher + subscriber
+
+For platforms that split publish from subscribe (canonical case: AWS, where SNS publishes and SQS receives):
+
+```ts
+import { PubSub, compose } from '@pubber-subber/core';
+import { awsSns } from '@pubber-subber/aws-sns';
+import { awsSqs } from '@pubber-subber/aws-sqs';
+
+const pubsub = new PubSub({
+  adapter: compose({
+    publisher: awsSns({ region: 'us-east-1' }),
+    subscriber: awsSqs({
+      region: 'us-east-1',
+      queueUrl: 'https://sqs.us-east-1.amazonaws.com/000000000000/orders',
+    }),
+    name: 'sns-sqs', // optional
+  }),
+});
+```
+
+Capabilities are unioned (`publish` from publisher, `subscribe`/`patternSubscribe`/`ack` from subscriber). `connect`/`disconnect` fan out to both. `publish` routes to the publisher; `subscribe` routes to the subscriber.
+
+---
+
+## 6. Codecs
+
+```ts
+import { jsonCodec, passthroughCodec, type Codec } from '@pubber-subber/core';
+
+interface Codec {
+  readonly name: string;
+  encode(value: unknown): string | Uint8Array;
+  decode<T = unknown>(data: string | Uint8Array): T;
+}
+```
+
+- **`jsonCodec()`** — default for adapters that don't override. `JSON.stringify` / `JSON.parse`, throwing `SerializationError` on failure.
+- **`passthroughCodec()`** — for byte-pipe adapters; accepts only `string` or `Uint8Array`, throws otherwise.
+- **Custom** — implement `Codec` for MessagePack, Protobuf, AVRO, etc.
+
+```ts
+import * as msgpack from '@msgpack/msgpack';
+
+const msgpackCodec: Codec = {
+  name: 'msgpack',
+  encode: (v) => msgpack.encode(v),
+  decode: (d) => msgpack.decode(d instanceof Uint8Array ? d : new TextEncoder().encode(d)),
+};
+
+const pubsub = new PubSub({
+  adapter: redis({ url, codec: msgpackCodec }),
+});
+```
+
+The memory adapter passes references and ignores `codec`; everything else accepts `opts.codec`.
+
+---
+
+## 7. Errors
+
+All errors extend `PubSubError`, which extends `Error`.
+
+```ts
+import {
+  PubSubError,
+  NotSupportedError,
+  ConnectionError,
+  SerializationError,
+  SubscriptionError,
+  PublishError,
+} from '@pubber-subber/core';
+
+try {
+  await pubsub.publish('t', payload);
+} catch (err) {
+  if (err instanceof PublishError) { /* e.g. pg NOTIFY > 7500 bytes */ }
+  if (err instanceof NotSupportedError) { /* op not supported */ }
+  if (err instanceof PubSubError) { /* catches everything from this lib */ }
+}
+```
+
+| Class | Thrown when |
+| --- | --- |
+| `NotSupportedError` | Adapter doesn't support the requested op (e.g. `subscribe()` on aws-sns). |
+| `ConnectionError` | Connect or disconnect failed. |
+| `SerializationError` | Codec encode/decode failed. |
+| `SubscriptionError` | Subscribe wiring failed (e.g. missing config). |
+| `PublishError` | Publish wiring failed (e.g. pg payload size limit). |
+
+---
+
+## 8. In-memory adapter — `@pubber-subber/memory`
+
+```sh
+npm install @pubber-subber/core @pubber-subber/memory
+```
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { memory } from '@pubber-subber/memory';
+
+const pubsub = new PubSub({ adapter: memory({ rawPayloads: false }) });
+
+await pubsub.subscribe('users.*', (msg) => console.log(msg.topic, msg.payload));
+await pubsub.publish('users.created', { id: 1 });
+```
+
+### Options
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `rawPayloads` | `false` | If `true`, subscribers get the publisher's exact object reference. Default `structuredClone()`s payloads so subscribers can't mutate. |
+
+### Capabilities
+
+```
+publish: true | subscribe: true | patternSubscribe: true | ack: false
+```
+
+### Pattern matching
+
+- `*` matches within a segment (won't cross `.`)
+- `**` matches across segments
+- `?` matches one char (not `.`)
+
+```ts
+await pubsub.subscribe('users.*', handler);   // users.created — NOT users.created.email
+await pubsub.subscribe('users.**', handler);  // users.created.email
+```
+
+---
+
+## 9. Redis adapter — `@pubber-subber/redis`
+
+```sh
+npm install @pubber-subber/core @pubber-subber/redis ioredis
+```
+
+Works with Redis, Valkey, KeyDB, Dragonfly.
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { redis } from '@pubber-subber/redis';
+
+const pubsub = new PubSub({
+  adapter: redis({ url: 'redis://localhost:6379' }),
+});
+
+await pubsub.subscribe('users.*', handler);   // auto -> PSUBSCRIBE
+await pubsub.publish('users.created', { id: 1 });
+```
+
+### Options
+
+| Option | Notes |
+| --- | --- |
+| `url` | `redis://[:password@]host:port[/db]`, `rediss://` for TLS. |
+| `options` | ioredis `RedisOptions`. Merged with `url`. |
+| `clients` | `{ publisher: Redis; subscriber: Redis }` — bring your own. Adapter won't `quit()` them. Must be distinct clients. |
+| `codec` | Default `jsonCodec()`. |
+
+### Meta
+
+- Publish: `{ channel?: string }` — override the wire channel without changing `AdapterMessage.topic`.
+- Subscribe: `{ pattern?: boolean }` — force `PSUBSCRIBE` even without wildcards.
+
+### Capabilities
+
+```
+publish: true | subscribe: true | patternSubscribe: true | ack: false
+```
+
+### Reconnect
+
+ioredis handles socket reconnects. On `ready` the adapter re-subscribes all channels and patterns. Messages published while disconnected are lost (Redis pub/sub is fire-and-forget).
+
+### Local Redis
+
+```sh
+docker run --rm -d -p 6379:6379 redis:7
+```
+
+---
+
+## 10. Postgres adapter — `@pubber-subber/pg`
+
+```sh
+npm install @pubber-subber/core @pubber-subber/pg pg
+```
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { pg } from '@pubber-subber/pg';
+
+const pubsub = new PubSub({
+  adapter: pg({ connectionString: 'postgres://user:pass@host:5432/db' }),
+});
+
+await pubsub.subscribe('outbox.processed', (msg) => console.log(msg.payload));
+await pubsub.publish('outbox.processed', { outboxId: 42 });
+```
+
+### Options
+
+| Option | Notes |
+| --- | --- |
+| `connectionString` | Standard libpq URL. |
+| `config` | Full `pg.ClientConfig`. |
+| `client` | Bring-your-own `pg.Client`. Adapter doesn't `connect()` / `end()` it. |
+| `codec` | Default `jsonCodec()`. |
+
+### Meta
+
+- Publish: `{ channel?: string }`
+- Subscribe: `{ channel?: string }`
+
+### Capabilities
+
+```
+publish: true | subscribe: true | patternSubscribe: false | ack: false
+```
+
+### Postgres-specific constraints
+
+- Channel names ≤ 63 bytes. Longer topics are hashed to `pubsub_<sha256[:32]>`; internal map preserves the original logical topic.
+- NOTIFY payloads ≤ ~8000 bytes. Adapter rejects encoded payloads > 7500 bytes with `PublishError`. Pattern: publish a row id, resolve the body via `SELECT`.
+- No wildcards. `capabilities.patternSubscribe = false`.
+- One dedicated `pg.Client` per adapter for LISTEN traffic.
+- Publishes use parameterized `SELECT pg_notify($1, $2)` — no SQL injection risk.
+
+### Local Postgres
+
+```sh
+docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16
+```
+
+---
+
+## 11. Google Cloud Pub/Sub adapter — `@pubber-subber/gcp-pubsub`
+
+```sh
+npm install @pubber-subber/core @pubber-subber/gcp-pubsub @google-cloud/pubsub
+```
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { gcpPubSub } from '@pubber-subber/gcp-pubsub';
+
+const pubsub = new PubSub({
+  adapter: gcpPubSub({ projectId: 'my-project' }),
+});
+
+await pubsub.subscribe(
+  'users.created',
+  (msg) => console.log(msg.payload),
+  { subscriptionName: 'workers-users-created' },
+);
+
+await pubsub.publish('users.created', { id: 1 }, {
+  attributes: { tenantId: 't1' },
+  orderingKey: 'user-1',
+});
+```
+
+### Options
+
+| Option | Notes |
+| --- | --- |
+| `projectId` | GCP project. Falls back to SDK auto-detection. |
+| `client` | Pre-built `@google-cloud/pubsub` client. |
+| `options` | Full `ClientConfig`. |
+| `codec` | Default `jsonCodec()`. |
+| `subscriptionPrefix` | Prefix for auto-generated subscription names (default `'pubber'`). |
+
+### Meta
+
+- Publish: `{ attributes?: Record<string, string>; orderingKey?: string }`
+- Subscribe:
+  - `subscriptionName: string` (required for production)
+  - `createIfMissing?: boolean`
+  - `subscriptionOptions?: CreateSubscriptionOptions`
+  - `ephemeral?: boolean` (delete sub on unsubscribe — dev/test only)
+
+### Capabilities
+
+```
+publish: true | subscribe: true | patternSubscribe: false | ack: true
+```
+
+### Ack semantics
+
+- Resolve → `message.ack()`
+- Throw → `message.nack()`
+- Call `msg.ack()` / `msg.nack()` inside the handler for manual control; the adapter skips auto-resolve.
+
+### Emulator for development
+
+```sh
+gcloud beta emulators pubsub start --project=test-project --host-port=0.0.0.0:8085
+export PUBSUB_EMULATOR_HOST=localhost:8085
+gcloud --project=test-project pubsub topics create demo-topic
+```
+
+---
+
+## 12. AWS SNS adapter — `@pubber-subber/aws-sns` (publish-only)
+
+```sh
+npm install @pubber-subber/core @pubber-subber/aws-sns @aws-sdk/client-sns
+```
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { awsSns } from '@pubber-subber/aws-sns';
+
+const pubsub = new PubSub({ adapter: awsSns({ region: 'us-east-1' }) });
+await pubsub.publish('arn:aws:sns:us-east-1:000:orders', { id: 1 });
+```
+
+### Options
+
+| Option | Notes |
+| --- | --- |
+| `region` | AWS region. |
+| `topicArn` | Default TopicArn for publishes. |
+| `client` | Pre-built `SNSClient`. |
+| `options` | Full `SNSClientConfig`. |
+| `codec` | Default `jsonCodec()`. |
+
+### Publish meta
+
+| Field | Notes |
+| --- | --- |
+| `topicArn` | Override per call. |
+| `targetArn` | Mobile push endpoint. |
+| `phoneNumber` | SMS recipient. |
+| `messageAttributes` | Forwarded to SNS. |
+| `messageGroupId`, `messageDeduplicationId` | FIFO topics. |
+| `subject` | Email subject. |
+
+### Capabilities
+
+```
+publish: true | subscribe: false | patternSubscribe: false | ack: false
+```
+
+`subscribe()` throws `NotSupportedError`. Pair with aws-sqs via `compose()` for full duplex.
+
+### TopicArn resolution
+
+1. The `topic` arg if it starts with `arn:aws:sns:`.
+2. `opts.topicArn` otherwise.
+3. `meta.topicArn` for per-call override.
+
+---
+
+## 13. AWS SQS adapter — `@pubber-subber/aws-sqs` (subscribe-only)
+
+```sh
+npm install @pubber-subber/core @pubber-subber/aws-sqs @aws-sdk/client-sqs
+```
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { awsSqs } from '@pubber-subber/aws-sqs';
+
+const pubsub = new PubSub({
+  adapter: awsSqs({
+    region: 'us-east-1',
+    queueUrl: 'https://sqs.us-east-1.amazonaws.com/000:orders',
+  }),
+});
+
+await pubsub.subscribe('orders', (msg) => process(msg.payload));
+// auto-ack on resolve, auto-nack on throw
+```
+
+### Options
+
+| Option | Notes |
+| --- | --- |
+| `region` | AWS region. |
+| `queueUrl` | Default queue URL. |
+| `client` | Pre-built `SQSClient`. |
+| `options` | Full `SQSClientConfig`. |
+| `codec` | Default `jsonCodec()`. |
+
+### Subscribe meta
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `queueUrl` | `opts.queueUrl` | Required somewhere. |
+| `waitTimeSeconds` | 20 | Long-poll wait. 0–20. |
+| `maxMessages` | 10 | Per batch. 1–10. |
+| `visibilityTimeout` | (queue default) | Per subscription. |
+| `handlerConcurrency` | 5 | Max in-flight handlers. |
+
+### Capabilities
+
+```
+publish: false | subscribe: true | patternSubscribe: false | ack: true
+```
+
+### Ack semantics
+
+- Resolve → `DeleteMessage`.
+- Throw → `ChangeMessageVisibility(VisibilityTimeout=0)` (immediate retry).
+- Manual: `msg.ack()` / `msg.nack()` in handler.
+
+### SNS → SQS envelope unwrapping
+
+If the message body is an SNS notification envelope (`{"Type":"Notification","Message":"..."}`), the adapter unwraps it and decodes the inner `Message`. SNS attributes are exposed on `AdapterMessage.meta.snsAttributes`.
+
+### LocalStack
+
+```sh
+docker run --rm -d -p 4566:4566 -e SERVICES=sns,sqs localstack/localstack
+```
+
+```ts
+awsSqs({
+  region: 'us-east-1',
+  queueUrl: '...',
+  options: { endpoint: 'http://localhost:4566' },
+});
+```
+
+---
+
+## 14. RxJS bridge — `@pubber-subber/rxjs`
+
+```sh
+npm install @pubber-subber/core @pubber-subber/rxjs rxjs
+```
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { memory } from '@pubber-subber/memory';
+import { fromTopic, toObservable } from '@pubber-subber/rxjs';
+import { bufferTime, mergeMap, take, toArray } from 'rxjs';
+
+const pubsub = new PubSub({ adapter: memory() });
+
+// Unwrapped payload
+fromTopic<{ id: number }>(pubsub, 'users.created')
+  .subscribe((user) => console.log(user.id));
+
+// Full envelope
+toObservable<{ id: number }>(pubsub, 'users.*')
+  .pipe(bufferTime(250), mergeMap((batch) => persist(batch)))
+  .subscribe();
+```
+
+```ts
+toObservable<T>(pubsub, topic, meta?): Observable<AdapterMessage<T>>
+fromTopic<T>(pubsub, topic, meta?): Observable<T>
+```
+
+Both lazy-create the underlying pubsub subscription on first observer attach and tear it down on the last unsubscribe.
+
+Teardown is safe even if it races with the initial `subscribe()` call.
+
+---
+
+## 15. Writing a custom adapter
+
+```ts
+import type {
+  AdapterMessage,
+  MessageHandler,
+  PubSubAdapter,
+  SubscriptionHandle,
+} from '@pubber-subber/core';
+
+interface MyPublishMeta { /* knobs on publish */ }
+interface MySubscribeMeta { /* knobs on subscribe */ }
+
+export function myAdapter(opts: MyOptions): PubSubAdapter<MyPublishMeta, MySubscribeMeta> {
+  return {
+    name: 'my-adapter',
+    capabilities: {
+      publish: true,
+      subscribe: true,
+      patternSubscribe: false,
+      ack: false,
+    },
+    async connect() { /* ... */ },
+    async disconnect() { /* ... */ },
+    async publish(topic, payload, meta) { /* ... */ },
+    async subscribe(topic, handler, meta): Promise<SubscriptionHandle> {
+      // wire delivery, return a handle
+      return { id: '...', topic, unsubscribe: async () => { /* ... */ } };
+    },
+  };
+}
+```
+
+The three generic meta slots flow through the `PubSub` facade's types automatically via `PublishMetaOf<A>` / `SubscribeMetaOf<A>` — users get full IntelliSense for your knobs.
+
+---
+
+## 16. Conformance test kit
+
+```ts
+// my-adapter/test/conformance.test.ts
+import { runConformance } from '@pubber-subber/core/testing';
+import { myAdapter } from '../src/index.js';
+
+runConformance({
+  name: 'my-adapter',
+  createAdapter: async () => myAdapter({ /* ... */ }),
+  teardownAdapter: async (adapter) => { /* close conn / stop container */ },
+  skip: {
+    patternSubscribe: true,   // for adapters that can't support globs
+    metadata: false,
+    multipleSubscribers: false,
+    lateSubscriber: false,
+  },
+  deliveryTimeoutMs: 5000,
+  quietWindowMs: 500,
+});
+```
+
+Tests covered: single round-trip, multi-subscriber fan-out, no replay for late subscribers, unsubscribe stops delivery, metadata pass-through, pattern subscriptions (when capability declared).
+
+`vitest` is an optional peer dependency — only required when importing `@pubber-subber/core/testing`.
+
+---
+
+## 17. Common patterns
+
+### Test/prod parity
+
+Use the memory adapter in tests and a real one in prod — the rest of your code is unchanged:
+
+```ts
+import { PubSub, type PubSubAdapter } from '@pubber-subber/core';
+
+function makePubSub(adapter: PubSubAdapter) {
+  return new PubSub({ adapter });
+}
+
+// test
+import { memory } from '@pubber-subber/memory';
+const app = makePubSub(memory());
+
+// prod
+import { redis } from '@pubber-subber/redis';
+const app = makePubSub(redis({ url: process.env.REDIS_URL! }));
+```
+
+### Typed payloads
+
+```ts
+interface UserCreated { id: number; name: string }
+
+await pubsub.publish<UserCreated>('users.created', { id: 1, name: 'A' });
+
+await pubsub.subscribe<UserCreated>('users.created', (msg) => {
+  msg.payload.id;     // typed
+});
+```
+
+### Tenant-scoped tracing via metadata
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+
+const pubsub = new PubSub({
+  adapter: ...,
+  defaultMeta: { publish: { tenantId: getTenantId() } },
+  onError: (err, ctx) => logger.error({ ...ctx, err }, 'pubsub error'),
+});
+```
+
+### Manual ack / DLQ routing (GCP, SQS)
+
+```ts
+await pubsub.subscribe('payments', async (msg) => {
+  try {
+    await process(msg.payload);
+    await msg.ack?.();
+  } catch (err) {
+    if (isTransient(err)) {
+      await msg.nack?.();              // retry
+    } else {
+      await routeToDLQ(msg.payload, err);
+      await msg.ack?.();               // don't retry — drop from queue
+    }
+  }
+});
+```
+
+### Stream operations via RxJS
+
+```ts
+import { fromTopic } from '@pubber-subber/rxjs';
+import { bufferTime, filter, mergeMap } from 'rxjs';
+
+fromTopic<PageView>(pubsub, 'analytics.*')
+  .pipe(
+    filter((v) => !v.path.startsWith('/internal')),
+    bufferTime(250),
+    mergeMap((batch) => writeBatch(batch)),
+  )
+  .subscribe();
+```
+
+### SNS → SQS fan-out
+
+```ts
+import { PubSub, compose } from '@pubber-subber/core';
+import { awsSns } from '@pubber-subber/aws-sns';
+import { awsSqs } from '@pubber-subber/aws-sqs';
+
+const pubsub = new PubSub({
+  adapter: compose({
+    publisher: awsSns({ region: 'us-east-1' }),
+    subscriber: awsSqs({
+      region: 'us-east-1',
+      queueUrl: process.env.SQS_URL!,
+    }),
+  }),
+});
+```
+
+---
+
+## Links
+
+- GitHub: https://github.com/samishal1998/pubber-subber
+- Issues: https://github.com/samishal1998/pubber-subber/issues
+- Per-package docs:
+  - https://github.com/samishal1998/pubber-subber/blob/main/llms-core.txt
+  - https://github.com/samishal1998/pubber-subber/blob/main/llms-memory.txt
+  - https://github.com/samishal1998/pubber-subber/blob/main/llms-redis.txt
+  - https://github.com/samishal1998/pubber-subber/blob/main/llms-pg.txt
+  - https://github.com/samishal1998/pubber-subber/blob/main/llms-gcp-pubsub.txt
+  - https://github.com/samishal1998/pubber-subber/blob/main/llms-aws-sns.txt
+  - https://github.com/samishal1998/pubber-subber/blob/main/llms-aws-sqs.txt
+  - https://github.com/samishal1998/pubber-subber/blob/main/llms-rxjs.txt

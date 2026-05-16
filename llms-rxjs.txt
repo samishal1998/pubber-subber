@@ -1,0 +1,118 @@
+# @pubber-subber/rxjs
+
+> Optional RxJS bridge for pubber-subber. Turn any topic subscription into an `Observable`. Works with every adapter. Lives in its own package so the core stays dependency-free.
+
+## Install
+
+```sh
+npm install @pubber-subber/core @pubber-subber/rxjs rxjs
+# pnpm add @pubber-subber/core @pubber-subber/rxjs rxjs
+```
+
+`rxjs` is a **peer dependency**. Supports RxJS 7 and 8.
+
+You also need at least one adapter:
+
+```sh
+npm install @pubber-subber/memory
+# or any other adapter package
+```
+
+## Setup
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { memory } from '@pubber-subber/memory';
+import { fromTopic } from '@pubber-subber/rxjs';
+
+const pubsub = new PubSub({ adapter: memory() });
+
+const sub = fromTopic<{ id: number }>(pubsub, 'users.created')
+  .subscribe((user) => console.log(user.id));
+
+await pubsub.publish('users.created', { id: 1 });
+
+sub.unsubscribe();      // also tears down the underlying pubsub subscription
+```
+
+## API
+
+```ts
+toObservable<T>(pubsub, topic, meta?): Observable<AdapterMessage<T>>
+fromTopic<T>(pubsub, topic, meta?): Observable<T>
+```
+
+- **`fromTopic`** — emits the unwrapped payload. Convenient when you don't care about the envelope.
+- **`toObservable`** — emits the full `AdapterMessage` envelope (`topic`, `payload`, `raw`, `meta`, optional `ack`/`nack`).
+
+Both lazy-create the underlying pubsub subscription on first observer attach and tear it down on the last unsubscribe.
+
+## Pipelines
+
+The whole point of the bridge — compose with RxJS operators:
+
+```ts
+import { fromTopic } from '@pubber-subber/rxjs';
+import { bufferTime, filter, mergeMap } from 'rxjs';
+
+interface PageView { user: string; path: string; ts: number }
+
+fromTopic<PageView>(pubsub, 'analytics.pageview')
+  .pipe(
+    filter((v) => !v.path.startsWith('/internal')),
+    bufferTime(250),
+    mergeMap((batch) => writeBatch(batch)),
+  )
+  .subscribe();
+```
+
+## Common patterns
+
+### Take a fixed number of values
+
+```ts
+import { firstValueFrom, take, toArray } from 'rxjs';
+
+const first3 = await firstValueFrom(
+  fromTopic<number>(pubsub, 'counter').pipe(take(3), toArray()),
+);
+// Resolves after 3 publishes; the underlying pubsub subscription is torn down.
+```
+
+### Use the full envelope
+
+```ts
+import { toObservable } from '@pubber-subber/rxjs';
+
+toObservable<Order>(pubsub, 'orders.*').subscribe((msg) => {
+  console.log(msg.topic);     // e.g. 'orders.created'
+  console.log(msg.payload);   // Order
+  console.log(msg.meta);      // adapter-specific (e.g. Redis pattern, GCP attributes, SQS receiptHandle)
+});
+```
+
+### Adapter-specific meta on subscribe
+
+```ts
+// Redis: force pattern subscribe even without wildcards
+fromTopic<number>(pubsub, 'orders', { pattern: true });
+
+// GCP Pub/Sub: provide subscription name
+fromTopic<Order>(pubsub, 'orders.created', {
+  subscriptionName: 'workers-orders',
+});
+```
+
+## Notes
+
+- **Cancellation race**: teardown is safe even if it races with the initial `subscribe()` call — the bridge tracks a cancellation flag and unsubscribes upstream as soon as it resolves. Subscribing and immediately unsubscribing never throws or leaks.
+- **No `.observe()` on `PubSub`**: adding it would pull RxJS types into core. The function form keeps the coupling one-way; apps that don't use RxJS pay no cost.
+- **Multi-subscriber**: each Observable subscription creates its own underlying pubsub subscription. For transports that fan out anyway (Redis, in-memory) this is the expected behavior. For transports with shared subscriptions (GCP, SQS) messages distribute across observers per the broker's semantics.
+- **Errors**: errors from the underlying `pubsub.subscribe()` are emitted via `subscriber.error()`. Errors thrown from RxJS operators bubble up the pipeline as usual; they don't propagate back into the pubsub subscription.
+
+## Links
+
+- npm: https://www.npmjs.com/package/@pubber-subber/rxjs
+- GitHub: https://github.com/samishal1998/pubber-subber/tree/main/packages/rxjs
+- Core: https://github.com/samishal1998/pubber-subber/blob/main/llms-core.txt
+- RxJS: https://rxjs.dev/

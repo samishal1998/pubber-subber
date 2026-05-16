@@ -1,0 +1,154 @@
+# @pubber-subber/redis
+
+> Redis pub/sub adapter built on `ioredis`. Works with Redis, Valkey, KeyDB, Dragonfly, or any Redis-protocol-compatible server. Auto-resubscribes on reconnect.
+
+## Install
+
+```sh
+npm install @pubber-subber/core @pubber-subber/redis ioredis
+# pnpm add @pubber-subber/core @pubber-subber/redis ioredis
+```
+
+`ioredis` is a **peer dependency** — install it alongside.
+
+## Setup
+
+```ts
+import { PubSub } from '@pubber-subber/core';
+import { redis } from '@pubber-subber/redis';
+
+const pubsub = new PubSub({
+  adapter: redis({ url: 'redis://localhost:6379' }),
+});
+
+// Subscribe (exact)
+const sub = await pubsub.subscribe('users.created', (msg) => {
+  console.log(msg.topic, msg.payload);
+});
+
+// Subscribe (glob pattern -> PSUBSCRIBE)
+const wildSub = await pubsub.subscribe('users.*', (msg) => {
+  console.log(msg.topic, msg.payload);
+});
+
+// Publish
+await pubsub.publish('users.created', { id: 1, name: 'Alice' });
+
+// Teardown
+await sub.unsubscribe();
+await wildSub.unsubscribe();
+await pubsub.disconnect();
+```
+
+## Options
+
+```ts
+redis({
+  url?: string;
+  options?: RedisOptions;                            // ioredis-compatible
+  clients?: { publisher: Redis; subscriber: Redis };
+  codec?: Codec;
+})
+```
+
+| Option | Notes |
+| --- | --- |
+| `url` | Redis URL: `redis://[:password@]host:port[/db]`, `rediss://...` for TLS. |
+| `options` | Full ioredis `RedisOptions`. Merged with `url`. |
+| `clients` | Bring-your-own `{ publisher, subscriber }`. Adapter won't call `quit()`. Must be two distinct clients — Redis rejects non-pub/sub commands on a `SUBSCRIBE`-d connection. |
+| `codec` | Payload encoder/decoder. Default `jsonCodec()`. |
+
+## Publish meta
+
+```ts
+await pubsub.publish('orders.created', payload, { channel: 'orders' });
+```
+
+| Field | Notes |
+| --- | --- |
+| `channel` | Override the on-wire Redis channel without changing `AdapterMessage.topic`. |
+
+## Subscribe meta
+
+```ts
+await pubsub.subscribe('orders', handler, { pattern: true });
+```
+
+| Field | Notes |
+| --- | --- |
+| `pattern` | Force `PSUBSCRIBE` even if topic has no `*`/`?`. Auto-detected from wildcards otherwise. |
+
+## Capabilities
+
+```
+publish: true
+subscribe: true
+patternSubscribe: true
+ack: false
+```
+
+## Bring your own ioredis clients
+
+Useful when you already manage Redis connections (e.g. cluster mode, sentinel, custom retry):
+
+```ts
+import { Redis } from 'ioredis';
+import { PubSub } from '@pubber-subber/core';
+import { redis } from '@pubber-subber/redis';
+
+const publisher = new Redis(process.env.REDIS_URL!);
+const subscriber = new Redis(process.env.REDIS_URL!);
+
+const pubsub = new PubSub({
+  adapter: redis({ clients: { publisher, subscriber } }),
+});
+```
+
+You are responsible for `publisher.quit()` / `subscriber.quit()` — the adapter will not call them.
+
+## Cluster mode
+
+```ts
+import { Cluster } from 'ioredis';
+import { redis } from '@pubber-subber/redis';
+
+const publisher = new Cluster([{ host: '...', port: 6379 }]);
+const subscriber = new Cluster([{ host: '...', port: 6379 }]);
+
+const pubsub = new PubSub({
+  adapter: redis({ clients: { publisher: publisher as any, subscriber: subscriber as any } }),
+});
+```
+
+## TLS / `rediss://`
+
+```ts
+redis({
+  url: 'rediss://my-redis.example.com:6379',
+  options: { tls: { /* ... */ } },
+})
+```
+
+## Reconnect
+
+`ioredis` handles socket-level reconnects automatically. On the `ready` event after a reconnect, the adapter re-subscribes every live channel and pattern.
+
+Messages published while the subscriber is disconnected are **not buffered** — Redis pub/sub is fire-and-forget.
+
+## Caveats
+
+- Redis pub/sub is fire-and-forget. Subscribers that fall behind have their messages dropped server-side. If you need durability, use Redis Streams (different adapter — not in this package).
+- `capabilities.ack = false`: no `ack`/`nack` to call on `AdapterMessage`.
+
+## Local Redis via Docker
+
+```sh
+docker run --rm -d -p 6379:6379 redis:7
+```
+
+## Links
+
+- npm: https://www.npmjs.com/package/@pubber-subber/redis
+- GitHub: https://github.com/samishal1998/pubber-subber/tree/main/packages/redis
+- Core: https://github.com/samishal1998/pubber-subber/blob/main/llms-core.txt
+- ioredis: https://github.com/redis/ioredis

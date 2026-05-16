@@ -1,0 +1,66 @@
+{
+  "name": "@pubber-subber/rxjs",
+  "version": "0.1.0",
+  "description": "RxJS bridge for @pubber-subber. Turn any topic subscription into an Observable.",
+  "keywords": [
+    "pubsub",
+    "pub-sub",
+    "messaging",
+    "events",
+    "rxjs",
+    "observable",
+    "reactive",
+    "typescript"
+  ],
+  "homepage": "https://github.com/samishal1998/pubber-subber/tree/main/packages/rxjs#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samishal1998/pubber-subber.git",
+    "directory": "packages/rxjs"
+  },
+  "bugs": {
+    "url": "https://github.com/samishal1998/pubber-subber/issues"
+  },
+  "author": "Sami Mishal",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "src", "README.md", "LICENSE"],
+  "scripts": {
+    "prebuild": "node ../../scripts/swap-package-json.mjs build",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "node ../../scripts/swap-package-json.mjs publish",
+    "postpublish": "node ../../scripts/swap-package-json.mjs build"
+  },
+  "peerDependencies": {
+    "@pubber-subber/core": "workspace:*",
+    "rxjs": "^7.0.0 || ^8.0.0"
+  },
+  "devDependencies": {
+    "@pubber-subber/core": "workspace:*",
+    "@pubber-subber/memory": "workspace:*",
+    "rxjs": "^7.8.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

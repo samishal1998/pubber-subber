@@ -1,0 +1,17 @@
+{
+  "name": "@pubber-subber/example-gcp-pubsub",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@google-cloud/pubsub": "^4.9.0",
+    "@pubber-subber/core": "workspace:*",
+    "@pubber-subber/gcp-pubsub": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}

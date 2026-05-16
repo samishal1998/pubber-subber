@@ -1,0 +1,70 @@
+{
+  "name": "@pubber-subber/pg",
+  "version": "0.0.1",
+  "description": "Postgres LISTEN/NOTIFY pub/sub adapter for @pubber-subber.",
+  "keywords": [
+    "pubsub",
+    "pub-sub",
+    "messaging",
+    "events",
+    "adapter",
+    "postgres",
+    "postgresql",
+    "listen",
+    "notify",
+    "pg_notify",
+    "typescript"
+  ],
+  "homepage": "https://github.com/samishal1998/pubber-subber/tree/main/packages/pg#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samishal1998/pubber-subber.git",
+    "directory": "packages/pg"
+  },
+  "bugs": {
+    "url": "https://github.com/samishal1998/pubber-subber/issues"
+  },
+  "author": "Sami Mishal",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "src", "README.md", "LICENSE"],
+  "scripts": {
+    "prebuild": "node ../../scripts/swap-package-json.mjs build",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "node ../../scripts/swap-package-json.mjs publish",
+    "postpublish": "node ../../scripts/swap-package-json.mjs build"
+  },
+  "peerDependencies": {
+    "@pubber-subber/core": "workspace:*",
+    "pg": "^8.0.0"
+  },
+  "devDependencies": {
+    "@pubber-subber/core": "workspace:*",
+    "@types/pg": "^8.11.10",
+    "pg": "^8.13.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

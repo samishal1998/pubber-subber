@@ -1,0 +1,23 @@
+# pubber-subber
+
+> Transport-agnostic pub/sub for Node.js. One API across in-memory, Redis, Postgres LISTEN/NOTIFY, Google Cloud Pub/Sub, AWS SNS/SQS. Bring-your-own adapter for anything else. Optional RxJS bridge. TypeScript-first, dual ESM/CJS, zero-dependency core.
+
+## Documentation
+
+- [Full reference](https://github.com/samishal1998/pubber-subber/blob/main/llms-full.txt): everything in one file — core + every adapter + RxJS + custom adapters + examples.
+
+## Per-package setup
+
+- [Core](https://github.com/samishal1998/pubber-subber/blob/main/llms-core.txt): `@pubber-subber/core` — `PubSub` facade, `compose()`, codecs, errors, conformance kit, custom adapter contract.
+- [In-memory](https://github.com/samishal1998/pubber-subber/blob/main/llms-memory.txt): `@pubber-subber/memory` — EventEmitter-backed, glob patterns, zero deps.
+- [Redis](https://github.com/samishal1998/pubber-subber/blob/main/llms-redis.txt): `@pubber-subber/redis` — Redis/Valkey/KeyDB/Dragonfly via `ioredis`.
+- [Postgres](https://github.com/samishal1998/pubber-subber/blob/main/llms-pg.txt): `@pubber-subber/pg` — Postgres `LISTEN/NOTIFY` via `pg`.
+- [Google Cloud Pub/Sub](https://github.com/samishal1998/pubber-subber/blob/main/llms-gcp-pubsub.txt): `@pubber-subber/gcp-pubsub` — via `@google-cloud/pubsub`.
+- [AWS SNS](https://github.com/samishal1998/pubber-subber/blob/main/llms-aws-sns.txt): `@pubber-subber/aws-sns` — publish-only via `@aws-sdk/client-sns`.
+- [AWS SQS](https://github.com/samishal1998/pubber-subber/blob/main/llms-aws-sqs.txt): `@pubber-subber/aws-sqs` — subscribe-only via `@aws-sdk/client-sqs`. Pair with `aws-sns` via `compose()` for SNS → SQS fan-out.
+- [RxJS](https://github.com/samishal1998/pubber-subber/blob/main/llms-rxjs.txt): `@pubber-subber/rxjs` — optional Observable bridge.
+
+## Repository
+
+- GitHub: https://github.com/samishal1998/pubber-subber
+- Issues: https://github.com/samishal1998/pubber-subber/issues
